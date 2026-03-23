@@ -1,28 +1,39 @@
 const express = require('express')
 const router = express.Router()
-const livres = require('../data/livres.json')
+const pool = require('../db')
 
-router.get('/', function(req, res) {
-  const titre = req.query.titre
-  if (titre) {
-    const resultats = livres.filter(function(l) {
-      return l.titre.toLowerCase().includes(titre.toLowerCase())
-    })
-    res.json(resultats)
-  } else {
-    res.json(livres)
+router.get('/', async function(req, res) {
+  try {
+    const titre = req.query.titre
+    let result
+    if (titre) {
+      result = await pool.query(
+        'SELECT * FROM livres WHERE LOWER(titre) LIKE LOWER($1)',
+        ['%' + titre + '%']
+      )
+    } else {
+      result = await pool.query('SELECT * FROM livres')
+    }
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ message: 'Erreur serveur' })
   }
 })
 
-router.get('/:id', function(req, res) {
-  const id = parseInt(req.params.id)
-  const livre = livres.find(function(l) {
-    return l.id === id
-  })
-  if (!livre) {
-    res.status(404).json({ message: 'Livre non trouve' })
-  } else {
-    res.json(livre)
+router.get('/:id', async function(req, res) {
+  try {
+    const id = parseInt(req.params.id)
+    const result = await pool.query(
+      'SELECT * FROM livres WHERE id = $1',
+      [id]
+    )
+    if (result.rows.length === 0) {
+      res.status(404).json({ message: 'Livre non trouve' })
+    } else {
+      res.json(result.rows[0])
+    }
+  } catch (err) {
+    res.status(500).json({ message: 'Erreur serveur' })
   }
 })
 
