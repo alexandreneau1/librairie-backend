@@ -3,7 +3,15 @@ const router = express.Router()
 const livres = require('../data/livres.json')
 
 router.get('/', function(req, res) {
-  res.json(livres)
+  const titre = req.query.titre
+  if (titre) {
+    const resultats = livres.filter(function(l) {
+      return l.titre.toLowerCase().includes(titre.toLowerCase())
+    })
+    res.json(resultats)
+  } else {
+    res.json(livres)
+  }
 })
 
 router.get('/:id', function(req, res) {
