@@ -5,7 +5,10 @@ const PORT = 3000
 app.use(express.json())
 
 const livresRouter = require('./routes/livres')
+const clientsRouter = require('./routes/clients')
+
 app.use('/livres', livresRouter)
+app.use('/clients', clientsRouter)
 
 app.get('/', function(req, res) {
   res.json({ message: 'Backend librairie OK' })
