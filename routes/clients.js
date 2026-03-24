@@ -1,44 +1,42 @@
 const express = require('express')
 const router = express.Router()
+const pool = require('../db')
 
-const clients = [
-  {
-    id: 1,
-    nom: 'Dupont',
-    prenom: 'Marie',
-    email: 'marie.dupont@email.com',
-    telephone: '0612345678'
-  },
-  {
-    id: 2,
-    nom: 'Martin',
-    prenom: 'Jean',
-    email: 'jean.martin@email.com',
-    telephone: '0698765432'
-  },
-  {
-    id: 3,
-    nom: 'Bernard',
-    prenom: 'Sophie',
-    email: 'sophie.bernard@email.com',
-    telephone: '0634567890'
-  }
-]
-
-router.get('/', function(req, res) {
-  res.json(clients)
-})
-
-router.get('/:id', function(req, res) {
-  const id = parseInt(req.params.id)
-  const client = clients.find(function(c) {
-    return c.id === id
-  })
-  if (!client) {
-    res.status(404).json({ message: 'Client non trouve' })
-  } else {
-    res.json(client)
+router.get('/', async function(req, res) {
+  try {
+    const result = await pool.query('SELECT * FROM clients')
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ message: 'Erreur serveur' })
   }
 })
 
+router.get('/:id', async function(req, res) {
+  try {
+    const id = parseInt(req.params.id)
+    const result = await pool.query(
+      'SELECT * FROM clients WHERE id = $1',
+      [id]
+    )
+    if (result.rows.length === 0) {
+      res.status(404).json({ message: 'Client non trouve' })
+    } else {
+      res.json(result.rows[0])
+    }
+  } catch (err) {
+    res.status(500).json({ message: 'Erreur serveur' })
+  }
+})
+router.post('/', async function(req, res) {
+  try {
+    const { nom, prenom, email, telephone } = req.body
+    const result = await pool.query(
+      'INSERT INTO clients (nom, prenom, email, telephone) VALUES ($1, $2, $3, $4) RETURNING *',
+      [nom, prenom, email, telephone]
+    )
+    res.status(201).json(result.rows[0])
+  } catch (err) {
+    res.status(500).json({ message: 'Erreur serveur' })
+  }
+})
 module.exports = router

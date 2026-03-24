@@ -36,5 +36,16 @@ router.get('/:id', async function(req, res) {
     res.status(500).json({ message: 'Erreur serveur' })
   }
 })
-
+router.post('/', async function(req, res) {
+  try {
+    const { titre, auteur, isbn, prix, stock } = req.body
+    const result = await pool.query(
+      'INSERT INTO livres (titre, auteur, isbn, prix, stock) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [titre, auteur, isbn, prix, stock]
+    )
+    res.status(201).json(result.rows[0])
+  } catch (err) {
+    res.status(500).json({ message: 'Erreur serveur' })
+  }
+})
 module.exports = router
