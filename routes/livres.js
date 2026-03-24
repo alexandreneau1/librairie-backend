@@ -3,20 +3,32 @@ const router = express.Router()
 const pool = require('../db')
 const verifierToken = require('../middleware/auth')
 
+const normalise = function(str) {
+  return str.toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9 ]/g, '')
+    .replace(/\s+/g, '')
+}
+
 router.get('/', async function(req, res) {
   try {
     const titre = req.query.titre
-    let result
+    const result = await pool.query('SELECT * FROM livres')
     if (titre) {
-      result = await pool.query(
-        'SELECT * FROM livres WHERE LOWER(titre) LIKE LOWER($1)',
-        ['%' + titre + '%']
-      )
+      const recherche = normalise(titre)
+      console.log('recherche normalisee:', recherche)
+      const filtres = result.rows.filter(function(livre) {
+        const titreNormalise = normalise(livre.titre)
+        console.log('titre normalise:', titreNormalise)
+        return titreNormalise.includes(recherche)
+      })
+      res.json(filtres)
     } else {
-      result = await pool.query('SELECT * FROM livres')
+      res.json(result.rows)
     }
-    res.json(result.rows)
   } catch (err) {
+    console.log('erreur:', err.message)
     res.status(500).json({ message: 'Erreur serveur' })
   }
 })
