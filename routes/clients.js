@@ -39,4 +39,39 @@ router.post('/', async function(req, res) {
     res.status(500).json({ message: 'Erreur serveur' })
   }
 })
+
+router.put('/:id', async function(req, res) {
+  try {
+    const id = parseInt(req.params.id)
+    const { nom, prenom, email, telephone } = req.body
+    const result = await pool.query(
+      'UPDATE clients SET nom=$1, prenom=$2, email=$3, telephone=$4 WHERE id=$6 RETURNING *',
+      [nom, prenom, email, telephone, id]
+    )
+    if (result.rows.length === 0) {
+      res.status(404).json({ message: 'Client non trouve' })
+    } else {
+      res.json(result.rows[0])
+    }
+  } catch (err) {
+    res.status(500).json({ message: 'Erreur serveur' })
+  }
+})
+
+router.delete('/:id', async function(req, res) {
+  try {
+    const id = parseInt(req.params.id)
+    const result = await pool.query(
+      'DELETE FROM clients WHERE id=$1 RETURNING *',
+      [id]
+    )
+    if (result.rows.length === 0) {
+      res.status(404).json({ message: 'Client non trouve' })
+    } else {
+      res.json({ message: 'Client supprime', client: result.rows[0] })
+    }
+  } catch (err) {
+    res.status(500).json({ message: 'Erreur serveur' })
+  }
+})
 module.exports = router
