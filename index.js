@@ -1,6 +1,8 @@
 const express = require('express')
 const app = express()
-const PORT = 3000
+const cors = require('cors')
+app.use(cors())
+const PORT = 3001
 
 app.use(express.json())
 
@@ -19,5 +21,5 @@ app.get('/', function(req, res) {
 })
 
 app.listen(PORT, function() {
-  console.log('Serveur demarre sur http://localhost:3000')
+  console.log('Serveur demarre sur http://localhost:3001')
 })
