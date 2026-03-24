@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const pool = require('../db')
+const verifierToken = require('../middleware/auth')
 
 router.get('/', async function(req, res) {
   try {
@@ -37,7 +38,7 @@ router.get('/:id', async function(req, res) {
   }
 })
 
-router.post('/', async function(req, res) {
+router.post('/', verifierToken, async function(req, res) {
   try {
     const { titre, auteur, isbn, prix, stock } = req.body
     const result = await pool.query(
@@ -50,7 +51,7 @@ router.post('/', async function(req, res) {
   }
 })
 
-router.put('/:id', async function(req, res) {
+router.put('/:id', verifierToken, async function(req, res) {
   try {
     const id = parseInt(req.params.id)
     const { titre, auteur, isbn, prix, stock } = req.body
@@ -68,7 +69,7 @@ router.put('/:id', async function(req, res) {
   }
 })
 
-router.delete('/:id', async function(req, res) {
+router.delete('/:id', verifierToken, async function(req, res) {
   try {
     const id = parseInt(req.params.id)
     const result = await pool.query(
