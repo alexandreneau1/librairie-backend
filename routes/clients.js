@@ -45,7 +45,7 @@ router.put('/:id', async function(req, res) {
     const id = parseInt(req.params.id)
     const { nom, prenom, email, telephone } = req.body
     const result = await pool.query(
-      'UPDATE clients SET nom=$1, prenom=$2, email=$3, telephone=$4 WHERE id=$6 RETURNING *',
+      'UPDATE clients SET nom=$1, prenom=$2, email=$3, telephone=$4 WHERE id=$5 RETURNING *',
       [nom, prenom, email, telephone, id]
     )
     if (result.rows.length === 0) {
