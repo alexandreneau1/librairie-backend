@@ -13,6 +13,7 @@ const ventesRouter = require('./routes/ventes')
 const authRouter = require('./routes/auth')
 const reservationsRouter = require('./routes/reservations')
 const commandesRouter = require('./routes/commandes')
+const compteRouter = require('./routes/compte')
 
 app.use('/livres', livresRouter)
 app.use('/clients', clientsRouter)
@@ -20,6 +21,7 @@ app.use('/ventes', ventesRouter)
 app.use('/auth', authRouter)
 app.use('/reservations', reservationsRouter)
 app.use('/commandes', commandesRouter)
+app.use('/compte', compteRouter)
 
 app.get('/', function(req, res) {
   res.json({ message: 'Backend librairie OK' })
