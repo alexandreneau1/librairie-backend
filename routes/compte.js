@@ -3,6 +3,10 @@ const router = express.Router()
 const pool = require('../db')
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
+const crypto = require('crypto')
+const { Resend } = require('resend')
+
+const resend = new Resend(process.env.RESEND_API_KEY)
 
 // POST /compte/inscription
 router.post('/inscription', async function(req, res) {
@@ -52,6 +56,94 @@ router.post('/connexion', async function(req, res) {
   }
 })
 
+// POST /compte/reset-demande
+router.post('/reset-demande', async function(req, res) {
+  try {
+    const { email } = req.body
+    if (!email) {
+      return res.status(400).json({ message: 'Email requis' })
+    }
+    const client = await pool.query('SELECT id FROM comptes_clients WHERE email = $1', [email])
+    // On répond toujours OK pour ne pas révéler si l'email existe
+    if (client.rows.length === 0) {
+      return res.json({ message: 'Si un compte existe avec cet email, un lien a été envoyé.' })
+    }
+    const token = crypto.randomBytes(32).toString('hex')
+    const expiration = new Date(Date.now() + 60 * 60 * 1000) // 1h
+    await pool.query(
+      'INSERT INTO reset_tokens (email, token, expire_le) VALUES ($1, $2, $3)',
+      [email, token, expiration]
+    )
+    const lien = 'http://localhost:3000/compte/reset/' + token
+    try {
+      await resend.emails.send({
+        from: 'Bookdog <onboarding@resend.dev>',
+        to: email,
+        subject: 'Réinitialisation de votre mot de passe — Bookdog',
+        html: `
+          <div style="font-family: Georgia, serif; max-width: 520px; margin: 0 auto; color: #1a1a1a;">
+            <div style="background-color: #1a3d2b; padding: 24px 32px;">
+              <h1 style="color: #f9f6f1; margin: 0; font-size: 22px; letter-spacing: 1px;">BOOKDOG</h1>
+              <p style="color: #c9a84c; margin: 4px 0 0; font-size: 13px;">42 rue Laugier, Paris 17e</p>
+            </div>
+            <div style="padding: 32px; background-color: #f9f6f1;">
+              <p style="font-size: 16px;">Bonjour,</p>
+              <p style="font-size: 15px; line-height: 1.6;">
+                Vous avez demandé à réinitialiser votre mot de passe. Cliquez sur le bouton ci-dessous pour en choisir un nouveau.
+              </p>
+              <div style="text-align: center; margin: 32px 0;">
+                <a href="${lien}" style="background-color: #1a3d2b; color: white; padding: 14px 32px; border-radius: 40px; text-decoration: none; font-size: 15px; font-weight: 700;">
+                  Réinitialiser mon mot de passe
+                </a>
+              </div>
+              <p style="font-size: 13px; color: #888; line-height: 1.6;">
+                Ce lien est valable 1 heure. Si vous n'avez pas fait cette demande, ignorez cet email.
+              </p>
+            </div>
+            <div style="background-color: #1a3d2b; padding: 16px 32px; text-align: center;">
+              <p style="color: #f9f6f1; font-size: 12px; margin: 0; opacity: 0.7;">© Bookdog — 42 rue Laugier, 75017 Paris</p>
+            </div>
+          </div>
+        `
+      })
+    } catch (mailErr) {
+      console.log('Erreur envoi mail reset:', mailErr.message)
+    }
+    res.json({ message: 'Si un compte existe avec cet email, un lien a été envoyé.' })
+  } catch (err) {
+    console.log('erreur reset-demande:', err.message)
+    res.status(500).json({ message: 'Erreur serveur' })
+  }
+})
+
+// POST /compte/reset-confirmer
+router.post('/reset-confirmer', async function(req, res) {
+  try {
+    const { token, mot_de_passe } = req.body
+    if (!token || !mot_de_passe) {
+      return res.status(400).json({ message: 'Token et mot de passe requis' })
+    }
+    if (mot_de_passe.length < 8) {
+      return res.status(400).json({ message: 'Le mot de passe doit contenir au minimum 8 caractères' })
+    }
+    const result = await pool.query(
+      'SELECT * FROM reset_tokens WHERE token = $1 AND utilise = FALSE AND expire_le > NOW()',
+      [token]
+    )
+    if (result.rows.length === 0) {
+      return res.status(400).json({ message: 'Lien invalide ou expiré' })
+    }
+    const resetToken = result.rows[0]
+    const hash = await bcrypt.hash(mot_de_passe, 10)
+    await pool.query('UPDATE comptes_clients SET mot_de_passe = $1 WHERE email = $2', [hash, resetToken.email])
+    await pool.query('UPDATE reset_tokens SET utilise = TRUE WHERE token = $1', [token])
+    res.json({ message: 'Mot de passe mis à jour avec succès' })
+  } catch (err) {
+    console.log('erreur reset-confirmer:', err.message)
+    res.status(500).json({ message: 'Erreur serveur' })
+  }
+})
+
 // Middleware : vérifier token client
 function verifierTokenClient(req, res, next) {
   const authHeader = req.headers['authorization']
@@ -69,7 +161,6 @@ function verifierTokenClient(req, res, next) {
 router.get('/historique', verifierTokenClient, async function(req, res) {
   try {
     const email = req.client.email
-
     const commandes = await pool.query(
       `SELECT c.id, c.type, c.statut, c.date_commande, l.titre, l.auteur, l.prix
        FROM commandes c
@@ -78,7 +169,6 @@ router.get('/historique', verifierTokenClient, async function(req, res) {
        ORDER BY c.date_commande DESC`,
       [email]
     )
-
     const reservations = await pool.query(
       `SELECT r.id, r.statut, r.date_reservation, l.titre, l.auteur, l.prix
        FROM reservations r
@@ -87,7 +177,6 @@ router.get('/historique', verifierTokenClient, async function(req, res) {
        ORDER BY r.date_reservation DESC`,
       [email]
     )
-
     const ventes = await pool.query(
       `SELECT v.id, v.quantite, v.prix_unitaire, v.date_vente, l.titre, l.auteur
        FROM ventes v
@@ -96,7 +185,6 @@ router.get('/historique', verifierTokenClient, async function(req, res) {
        ORDER BY v.date_vente DESC`,
       [email]
     )
-
     res.json({
       commandes: commandes.rows,
       reservations: reservations.rows,

@@ -17,10 +17,8 @@ router.get('/', async function(req, res) {
     const result = await pool.query('SELECT * FROM livres')
     if (titre) {
       const recherche = normalise(titre)
-      console.log('recherche normalisee:', recherche)
       const filtres = result.rows.filter(function(livre) {
         const titreNormalise = normalise(livre.titre)
-        console.log('titre normalise:', titreNormalise)
         return titreNormalise.includes(recherche)
       })
       res.json(filtres)
@@ -36,10 +34,7 @@ router.get('/', async function(req, res) {
 router.get('/:id', async function(req, res) {
   try {
     const id = parseInt(req.params.id)
-    const result = await pool.query(
-      'SELECT * FROM livres WHERE id = $1',
-      [id]
-    )
+    const result = await pool.query('SELECT * FROM livres WHERE id = $1', [id])
     if (result.rows.length === 0) {
       res.status(404).json({ message: 'Livre non trouve' })
     } else {
@@ -52,10 +47,10 @@ router.get('/:id', async function(req, res) {
 
 router.post('/', verifierToken, async function(req, res) {
   try {
-    const { titre, auteur, isbn, prix, stock } = req.body
+    const { titre, auteur, isbn, prix, stock, genre } = req.body
     const result = await pool.query(
-      'INSERT INTO livres (titre, auteur, isbn, prix, stock) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [titre, auteur, isbn, prix, stock]
+      'INSERT INTO livres (titre, auteur, isbn, prix, stock, genre) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [titre, auteur, isbn, prix, stock, genre || null]
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -65,11 +60,12 @@ router.post('/', verifierToken, async function(req, res) {
 
 router.put('/:id', verifierToken, async function(req, res) {
   try {
+    console.log('body reçu:', req.body)
     const id = parseInt(req.params.id)
-    const { titre, auteur, isbn, prix, stock } = req.body
+    const { titre, auteur, isbn, prix, stock, genre } = req.body
     const result = await pool.query(
-      'UPDATE livres SET titre=$1, auteur=$2, isbn=$3, prix=$4, stock=$5 WHERE id=$6 RETURNING *',
-      [titre, auteur, isbn, prix, stock, id]
+      'UPDATE livres SET titre=$1, auteur=$2, isbn=$3, prix=$4, stock=$5, genre=$6 WHERE id=$7 RETURNING *',
+      [titre, auteur, isbn, prix, stock, genre || null, id]
     )
     if (result.rows.length === 0) {
       res.status(404).json({ message: 'Livre non trouve' })
@@ -84,10 +80,7 @@ router.put('/:id', verifierToken, async function(req, res) {
 router.delete('/:id', verifierToken, async function(req, res) {
   try {
     const id = parseInt(req.params.id)
-    const result = await pool.query(
-      'DELETE FROM livres WHERE id=$1 RETURNING *',
-      [id]
-    )
+    const result = await pool.query('DELETE FROM livres WHERE id=$1 RETURNING *', [id])
     if (result.rows.length === 0) {
       res.status(404).json({ message: 'Livre non trouve' })
     } else {
