@@ -38,7 +38,7 @@ router.post('/connexion', async function(req, res) {
     const token = jwt.sign(
       { id: utilisateur.id, email: utilisateur.email, role: utilisateur.role },
       SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: '365d' }
     )
     res.json({ token })
   } catch (err) {
