@@ -32,9 +32,13 @@ function normaliserPrix(val) {
   return isNaN(n) ? null : n
 }
 
+function normaliserDelai(val) {
+  if (!val) return null
+  const n = parseInt(String(val).trim(), 10)
+  return isNaN(n) || n <= 0 ? null : n
+}
+
 // ── Détection colonnes Dilicom ────────────────────────────────────────────────
-// Dilicom utilise plusieurs formats selon les distributeurs.
-// On supporte les variantes les plus courantes.
 function detecterColonnes(headers) {
   const h = headers.map(s => (s || '').toLowerCase().trim())
   const trouver = (...candidates) => {
@@ -45,16 +49,17 @@ function detecterColonnes(headers) {
     return null
   }
   return {
-    isbn:        trouver('ean', 'isbn', 'gencod', 'code'),
-    titre:       trouver('titre', 'title', 'libelle'),
-    auteur:      trouver('auteur', 'author', 'contributeur'),
-    editeur:     trouver('editeur', 'publisher', 'diffuseur'),
-    collection:  trouver('collection', 'serie'),
-    prix:        trouver('prix', 'price', 'pvp', 'tarif'),
-    stock:       trouver('stock', 'disponible', 'quantite', 'dispo'),
+    isbn:          trouver('ean', 'isbn', 'gencod', 'code'),
+    titre:         trouver('titre', 'title', 'libelle'),
+    auteur:        trouver('auteur', 'author', 'contributeur'),
+    editeur:       trouver('editeur', 'publisher', 'diffuseur'),
+    collection:    trouver('collection', 'serie'),
+    prix:          trouver('prix', 'price', 'pvp', 'tarif'),
+    stock:         trouver('stock', 'disponible', 'quantite', 'dispo'),
     date_parution: trouver('parution', 'publication', 'date_pub'),
-    genre:       trouver('rayon', 'genre', 'theme', 'categorie'),
-    description: trouver('resume', 'description', 'quatrieme'),
+    genre:         trouver('rayon', 'genre', 'theme', 'categorie'),
+    description:   trouver('resume', 'description', 'quatrieme'),
+    delai_reappro: trouver('delai_reappro', 'delai', 'reappro', 'delai_reapprovisionnement', 'jours'),
   }
 }
 
@@ -87,7 +92,7 @@ function mapperGenre(valeur) {
   for (const [cle, genre] of Object.entries(MAPPING_GENRES)) {
     if (v.includes(cle)) return genre
   }
-  return null // genre inconnu → NULL en base
+  return null
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -99,7 +104,6 @@ router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, r
 
   const contenu = req.file.buffer.toString('utf-8')
 
-  // Détection séparateur (Dilicom utilise souvent ";" mais parfois ",")
   const premiereLigne = contenu.split('\n')[0]
   const separateur = (premiereLigne.split(';').length > premiereLigne.split(',').length) ? ';' : ','
 
@@ -124,7 +128,7 @@ router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, r
   }
 
   const rapport = { crees: 0, mis_a_jour: 0, ignores: 0, erreurs: [] }
-  const BATCH = 50 // traitement par lots pour ne pas saturer la connexion PG
+  const BATCH = 50
 
   for (let i = 0; i < parsed.data.length; i += BATCH) {
     const lot = parsed.data.slice(i, i + BATCH)
@@ -134,16 +138,16 @@ router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, r
         const t     = colonnes.titre  ? (ligne[colonnes.titre]  || '').trim() : ''
         if (!isbn || !t) { rapport.ignores++; return }
 
-        const a     = colonnes.auteur      ? (ligne[colonnes.auteur]      || '').trim() : null
-        const ed    = colonnes.editeur     ? (ligne[colonnes.editeur]     || '').trim() : null
-        const col   = colonnes.collection  ? (ligne[colonnes.collection]  || '').trim() : null
+        const a     = colonnes.auteur        ? (ligne[colonnes.auteur]        || '').trim() : null
+        const ed    = colonnes.editeur       ? (ligne[colonnes.editeur]       || '').trim() : null
+        const col   = colonnes.collection    ? (ligne[colonnes.collection]    || '').trim() : null
         const p     = normaliserPrix(colonnes.prix ? ligne[colonnes.prix] : null)
-        const s     = colonnes.stock       ? parseInt(ligne[colonnes.stock]) || 0 : 0
+        const s     = colonnes.stock         ? parseInt(ligne[colonnes.stock]) || 0 : 0
         const dp    = colonnes.date_parution ? (ligne[colonnes.date_parution] || '').trim() : null
         const g     = mapperGenre(colonnes.genre ? ligne[colonnes.genre] : null)
-        const desc  = colonnes.description ? (ligne[colonnes.description] || '').trim() || null : null
+        const desc  = colonnes.description   ? (ligne[colonnes.description]  || '').trim() || null : null
+        const delai = normaliserDelai(colonnes.delai_reappro ? ligne[colonnes.delai_reappro] : null)
 
-        // Vérifier existence
         const exist = await pool.query('SELECT id FROM livres WHERE isbn = $1', [isbn])
 
         if (exist.rows.length > 0) {
@@ -153,16 +157,17 @@ router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, r
                prix=COALESCE($5, prix), stock=$6,
                date_publication=COALESCE($7, date_publication),
                genre=COALESCE($8, genre),
-               description=COALESCE($9, description)
-             WHERE isbn=$10`,
-            [t, a, ed, col, p, s, dp, g, desc, isbn]
+               description=COALESCE($9, description),
+               delai_reappro=COALESCE($10, delai_reappro)
+             WHERE isbn=$11`,
+            [t, a, ed, col, p, s, dp, g, desc, delai, isbn]
           )
           rapport.mis_a_jour++
         } else {
           await pool.query(
-            `INSERT INTO livres (titre, auteur, isbn, prix, stock, editeur, collection, date_publication, genre, description)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-            [t, a, isbn, p || 0, s, ed, col, dp, g, desc]
+            `INSERT INTO livres (titre, auteur, isbn, prix, stock, editeur, collection, date_publication, genre, description, delai_reappro)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            [t, a, isbn, p || 0, s, ed, col, dp, g, desc, delai]
           )
           rapport.crees++
         }
@@ -186,7 +191,6 @@ router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, r
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/top-ventes', verifierToken, async (req, res) => {
   try {
-    // Pages Babelio meilleures ventes (on scrape les 3 premières pages = ~60 titres)
     const titresScrapés = []
 
     for (let page = 1; page <= 3; page++) {
@@ -202,7 +206,6 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
 
       const $ = cheerio.load(html)
 
-      // Structure Babelio : .livre_container > .titre et lien vers la fiche
       $('.livre_container, .masgrid_container').each((i, el) => {
         const lienFiche = $(el).find('a').attr('href') || ''
         const titreBrut = $(el).find('.titre, .book_title, h4, h3').first().text().trim()
@@ -217,7 +220,6 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
         }
       })
 
-      // Pause polie entre les requêtes
       await new Promise(r => setTimeout(r, 800))
     }
 
@@ -225,7 +227,6 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
       return res.status(502).json({ message: 'Aucun résultat récupéré depuis Babelio. La structure de la page a peut-être changé.' })
     }
 
-    // Croisement avec la base : recherche par titre normalisé
     const normaliser = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]/g, '').trim()
 
     const livresEnBase = await pool.query('SELECT id, titre, auteur FROM livres')
@@ -242,21 +243,18 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
       const titreN = normaliser(item.titre)
       const auteurN = normaliser(item.auteur)
 
-      // Correspondance exacte titre d'abord
       let match = mapBase.find(l => l.titreN === titreN)
 
-      // Si pas de match exact → correspondance partielle (titre contient ou est contenu)
       if (!match) {
         match = mapBase.find(l =>
           l.titreN.includes(titreN) || titreN.includes(l.titreN)
         )
       }
 
-      // Si auteur disponible, on affine
       if (match && auteurN) {
         const avecAuteur = mapBase.find(l =>
           (l.titreN === titreN || l.titreN.includes(titreN)) &&
-          l.auteurN.includes(auteurN.split(' ')[0]) // au moins le nom de famille
+          l.auteurN.includes(auteurN.split(' ')[0])
         )
         if (avecAuteur) match = avecAuteur
       }
@@ -268,7 +266,6 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
       }
     }
 
-    // Mise à jour selections : on vide les top_ventes existants puis on réinsère
     await pool.query("DELETE FROM selections WHERE type = 'top_vente' AND genre IS NULL")
 
     for (const a of associations) {
@@ -285,7 +282,7 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
       scrapes: titresScrapés.length,
       associes: associations.length,
       non_trouves_en_base: nonTrouves.length,
-      non_trouves: nonTrouves.slice(0, 20), // liste des titres non trouvés pour info
+      non_trouves: nonTrouves.slice(0, 20),
     })
 
   } catch (err) {
@@ -315,7 +312,6 @@ router.post('/prix', verifierToken, upload.single('fichier'), async (req, res) =
     transformHeader: h => h.toLowerCase().trim(),
   })
 
-  // Accepte : isbn/ean + label/prix/recompense
   const colISBN  = parsed.meta.fields?.find(f => ['isbn', 'ean', 'gencod', 'code'].includes(f))
   const colLabel = parsed.meta.fields?.find(f => ['label', 'prix', 'recompense', 'distinction', 'libelle'].includes(f))
 
@@ -342,7 +338,6 @@ router.post('/prix', verifierToken, upload.single('fichier'), async (req, res) =
 
     const livre_id = livre.rows[0].id
 
-    // Vérifie si cette sélection prix existe déjà
     const exist = await pool.query(
       "SELECT id FROM selections WHERE livre_id=$1 AND type='prix' AND label=$2",
       [livre_id, label]
