@@ -11,18 +11,48 @@ const resend = new Resend(process.env.RESEND_API_KEY)
 // POST /compte/inscription
 router.post('/inscription', async function(req, res) {
   try {
-    const { nom, prenom, email, mot_de_passe } = req.body
+    const { nom, prenom, email, mot_de_passe, ce_id } = req.body
     if (!email || !mot_de_passe) {
       return res.status(400).json({ message: 'Email et mot de passe requis' })
     }
+
     const existant = await pool.query('SELECT id FROM comptes_clients WHERE email = $1', [email])
     if (existant.rows.length > 0) {
       return res.status(409).json({ message: 'Un compte existe déjà avec cet email' })
     }
+
+    // Vérification CE : si ce_id fourni, on vérifie que le domaine email correspond bien
+    let ceIdValide = null
+    if (ce_id) {
+      const domaine = email.split('@')[1]?.toLowerCase()
+      if (domaine) {
+        const ceCheck = await pool.query(`
+          SELECT c.id FROM ces c
+          INNER JOIN ce_domaines d ON d.ce_id = c.id
+          WHERE c.id = $1 AND d.domaine = $2 AND c.actif = TRUE
+        `, [ce_id, domaine])
+        if (ceCheck.rows.length > 0) ceIdValide = ce_id
+        // Si le domaine ne correspond pas au ce_id fourni, on ignore silencieusement
+      }
+    } else {
+      // Tentative de détection automatique par domaine même sans ce_id explicite
+      const domaine = email.split('@')[1]?.toLowerCase()
+      if (domaine) {
+        const ceAuto = await pool.query(`
+          SELECT c.id FROM ces c
+          INNER JOIN ce_domaines d ON d.ce_id = c.id
+          WHERE d.domaine = $1 AND c.actif = TRUE
+        `, [domaine])
+        if (ceAuto.rows.length > 0) ceIdValide = ceAuto.rows[0].id
+      }
+    }
+
     const hash = await bcrypt.hash(mot_de_passe, 10)
     const result = await pool.query(
-      'INSERT INTO comptes_clients (nom, prenom, email, mot_de_passe) VALUES ($1, $2, $3, $4) RETURNING id, nom, prenom, email, date_inscription',
-      [nom, prenom, email, hash]
+      `INSERT INTO comptes_clients (nom, prenom, email, mot_de_passe, ce_id)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, nom, prenom, email, date_inscription, ce_id`,
+      [nom, prenom, email, hash, ceIdValide]
     )
     res.status(201).json(result.rows[0])
   } catch (err) {
@@ -44,12 +74,33 @@ router.post('/connexion', async function(req, res) {
     if (!valide) {
       return res.status(401).json({ message: 'Email ou mot de passe incorrect' })
     }
+
+    // Récupérer les infos CE si le client en a un
+    let ce = null
+    if (client.ce_id) {
+      const ceResult = await pool.query(
+        'SELECT id, nom, code, remise, adresse_livraison FROM ces WHERE id = $1 AND actif = TRUE',
+        [client.ce_id]
+      )
+      if (ceResult.rows.length > 0) ce = ceResult.rows[0]
+    }
+
     const token = jwt.sign(
       { id: client.id, email: client.email, role: 'client' },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     )
-    res.json({ token, client: { id: client.id, nom: client.nom, prenom: client.prenom, email: client.email } })
+
+    res.json({
+      token,
+      client: {
+        id: client.id,
+        nom: client.nom,
+        prenom: client.prenom,
+        email: client.email,
+        ce: ce, // null si pas de CE
+      }
+    })
   } catch (err) {
     console.log('erreur connexion:', err.message)
     res.status(500).json({ message: 'Erreur serveur' })
@@ -64,7 +115,6 @@ router.post('/reset-demande', async function(req, res) {
       return res.status(400).json({ message: 'Email requis' })
     }
     const client = await pool.query('SELECT id FROM comptes_clients WHERE email = $1', [email])
-    // On répond toujours OK pour ne pas révéler si l'email existe
     if (client.rows.length === 0) {
       return res.json({ message: 'Si un compte existe avec cet email, un lien a été envoyé.' })
     }
