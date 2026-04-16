@@ -291,4 +291,32 @@ router.delete('/wishlist/:livre_id', verifierTokenClient, async function(req, re
   }
 })
 
+// GET /compte/preferences
+router.get("/preferences", verifierTokenClient, async function(req, res) {
+  try {
+    const result = await pool.query(
+      "SELECT email_recommandations, email_relance_saga FROM comptes_clients WHERE id = $1",
+      [req.client.id]
+    )
+    if (result.rows.length === 0) return res.status(404).json({ message: "Client introuvable" })
+    res.json(result.rows[0])
+  } catch (err) {
+    res.status(500).json({ message: "Erreur serveur" })
+  }
+})
+
+// PUT /compte/preferences
+router.put("/preferences", verifierTokenClient, async function(req, res) {
+  try {
+    const { email_recommandations, email_relance_saga } = req.body
+    await pool.query(
+      "UPDATE comptes_clients SET email_recommandations = $1, email_relance_saga = $2 WHERE id = $3",
+      [email_recommandations !== false, email_relance_saga !== false, req.client.id]
+    )
+    res.json({ message: "Preferences mises a jour", email_recommandations, email_relance_saga })
+  } catch (err) {
+    res.status(500).json({ message: "Erreur serveur" })
+  }
+})
+
 module.exports = router

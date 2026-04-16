@@ -21,6 +21,7 @@ const analyticsRoutes = require('./routes/analytics')
 const recommandationsRoutes = require('./routes/recommandations')
 const evenementsRoutes = require('./routes/evenements')
 const ceRoutes = require('./routes/ce')
+const crmRoutes = require('./routes/crm')
 
 app.use('/evenements', evenementsRoutes)
 app.use('/api/recommandations', recommandationsRoutes)
@@ -36,6 +37,7 @@ app.use('/reservations', reservationsRouter)
 app.use('/commandes', commandesRouter)
 app.use('/compte', compteRouter)
 app.use('/ce', ceRoutes)
+app.use('/crm', crmRoutes)
 
 app.get('/', function(req, res) {
   res.json({ message: 'Backend librairie OK' })
