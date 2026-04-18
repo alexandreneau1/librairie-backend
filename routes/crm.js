@@ -146,8 +146,7 @@ router.post('/taches/envoyer', verifierToken, async (req, res) => {
       WHERE t.envoye = FALSE AND t.date_envoi <= NOW()
     `)
 
-    const rapport = { envoyes: 0, erreurs: 0, ignores: 0, details: [] as any[] }
-
+const rapport = { envoyes: 0, erreurs: 0, ignores: 0, details: [] }
     for (const tache of taches.rows) {
       try {
         // Vérifier que le client est toujours opt-in

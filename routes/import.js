@@ -7,19 +7,15 @@ const cheerio = require('cheerio')
 const pool = require('../db')
 const verifierToken = require('../middleware/auth')
 
-// ── Multer : fichiers en mémoire (pas sur disque) ─────────────────────────────
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 Mo max
+  limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (!file.originalname.match(/\.(csv|txt)$/i)) {
-      return cb(new Error('Seuls les fichiers CSV sont acceptés'))
-    }
+    if (!file.originalname.match(/\.(csv|txt)$/i)) return cb(new Error('Seuls les fichiers CSV sont acceptés'))
     cb(null, true)
   }
 })
 
-// ── Normalisation texte ───────────────────────────────────────────────────────
 function normaliserISBN(isbn) {
   if (!isbn) return null
   return String(isbn).replace(/[^0-9X]/gi, '').trim()
@@ -38,7 +34,14 @@ function normaliserDelai(val) {
   return isNaN(n) || n <= 0 ? null : n
 }
 
-// ── Détection colonnes Dilicom ────────────────────────────────────────────────
+// Calcule prix_achat à partir du prix public TTC et du taux de remise fournisseur
+// Ex : prix 20€, remise 35% → prix_achat = 20 / 1.055 * (1 - 0.35) = 12.32€ HT
+function calculerPrixAchat(prixTTC, remisePct) {
+  if (!prixTTC || remisePct === null || remisePct === undefined) return null
+  const prixHT = prixTTC / 1.055
+  return Math.round(prixHT * (1 - remisePct / 100) * 100) / 100
+}
+
 function detecterColonnes(headers) {
   const h = headers.map(s => (s || '').toLowerCase().trim())
   const trouver = (...candidates) => {
@@ -60,30 +63,19 @@ function detecterColonnes(headers) {
     genre:         trouver('rayon', 'genre', 'theme', 'categorie'),
     description:   trouver('resume', 'description', 'quatrieme'),
     delai_reappro: trouver('delai_reappro', 'delai', 'reappro', 'delai_reapprovisionnement', 'jours'),
+    // Colonnes remise fournisseur (présentes dans certains exports Dilicom/FEL)
+    remise:        trouver('remise', 'taux_remise', 'remise_libraire', 'discount', 'taux'),
+    prix_achat:    trouver('prix_achat', 'prix_net', 'tarif_net', 'cout'),
   }
 }
 
-// ── Mapping genres Dilicom → genres Bookdog ───────────────────────────────────
 const MAPPING_GENRES = {
-  'roman':               'Roman',
-  'litterature':         'Roman',
-  'policier':            'Policier',
-  'thriller':            'Thriller',
-  'science-fiction':     'Science-fiction',
-  'sf':                  'Science-fiction',
-  'fantasy':             'Fantasy',
-  'fantastique':         'Fantasy',
-  'biographie':          'Biographie',
-  'histoire':            'Histoire',
-  'essai':               'Essai',
-  'jeunesse':            'Jeunesse',
-  'bande dessinee':      'Bande dessinée',
-  'bd':                  'Bande dessinée',
-  'manga':               'Bande dessinée',
-  'poesie':              'Poésie',
-  'romance':             'Romance',
-  'developpement':       'Développement personnel',
-  'philosophie':         'Philosophie',
+  'roman': 'Roman', 'litterature': 'Roman', 'policier': 'Policier', 'thriller': 'Thriller',
+  'science-fiction': 'Science-fiction', 'sf': 'Science-fiction', 'fantasy': 'Fantasy',
+  'fantastique': 'Fantasy', 'biographie': 'Biographie', 'histoire': 'Histoire',
+  'essai': 'Essai', 'jeunesse': 'Jeunesse', 'bande dessinee': 'Bande dessinée',
+  'bd': 'Bande dessinée', 'manga': 'Bande dessinée', 'poesie': 'Poésie',
+  'romance': 'Romance', 'developpement': 'Développement personnel', 'philosophie': 'Philosophie',
 }
 
 function mapperGenre(valeur) {
@@ -97,20 +89,16 @@ function mapperGenre(valeur) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /import/catalogue
-// Upload CSV Dilicom → upsert dans `livres`
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'Aucun fichier reçu' })
 
   const contenu = req.file.buffer.toString('utf-8')
-
   const premiereLigne = contenu.split('\n')[0]
   const separateur = (premiereLigne.split(';').length > premiereLigne.split(',').length) ? ';' : ','
 
   const parsed = Papa.parse(contenu, {
-    header: true,
-    delimiter: separateur,
-    skipEmptyLines: true,
+    header: true, delimiter: separateur, skipEmptyLines: true,
     transformHeader: h => h.trim(),
   })
 
@@ -122,20 +110,20 @@ router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, r
 
   if (!colonnes.isbn || !colonnes.titre) {
     return res.status(400).json({
-      message: 'Colonnes ISBN et Titre introuvables. Vérifiez le format du fichier.',
+      message: 'Colonnes ISBN et Titre introuvables.',
       colonnes_detectees: parsed.meta.fields,
     })
   }
 
-  const rapport = { crees: 0, mis_a_jour: 0, ignores: 0, erreurs: [] }
+  const rapport = { crees: 0, mis_a_jour: 0, ignores: 0, avec_prix_achat: 0, erreurs: [] }
   const BATCH = 50
 
   for (let i = 0; i < parsed.data.length; i += BATCH) {
     const lot = parsed.data.slice(i, i + BATCH)
     await Promise.all(lot.map(async (ligne) => {
       try {
-        const isbn  = normaliserISBN(colonnes.isbn ? ligne[colonnes.isbn] : null)
-        const t     = colonnes.titre  ? (ligne[colonnes.titre]  || '').trim() : ''
+        const isbn = normaliserISBN(colonnes.isbn ? ligne[colonnes.isbn] : null)
+        const t    = colonnes.titre ? (ligne[colonnes.titre] || '').trim() : ''
         if (!isbn || !t) { rapport.ignores++; return }
 
         const a     = colonnes.auteur        ? (ligne[colonnes.auteur]        || '').trim() : null
@@ -148,6 +136,19 @@ router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, r
         const desc  = colonnes.description   ? (ligne[colonnes.description]  || '').trim() || null : null
         const delai = normaliserDelai(colonnes.delai_reappro ? ligne[colonnes.delai_reappro] : null)
 
+        // Prix d'achat : soit colonne directe, soit calculé depuis remise fournisseur
+        let prixAchat = null
+        if (colonnes.prix_achat) {
+          prixAchat = normaliserPrix(ligne[colonnes.prix_achat])
+        }
+        if (!prixAchat && colonnes.remise && p) {
+          const remise = normaliserPrix(ligne[colonnes.remise])
+          if (remise !== null && remise > 0 && remise < 100) {
+            prixAchat = calculerPrixAchat(p, remise)
+          }
+        }
+        if (prixAchat !== null) rapport.avec_prix_achat++
+
         const exist = await pool.query('SELECT id FROM livres WHERE isbn = $1', [isbn])
 
         if (exist.rows.length > 0) {
@@ -158,16 +159,17 @@ router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, r
                date_publication=COALESCE($7, date_publication),
                genre=COALESCE($8, genre),
                description=COALESCE($9, description),
-               delai_reappro=COALESCE($10, delai_reappro)
-             WHERE isbn=$11`,
-            [t, a, ed, col, p, s, dp, g, desc, delai, isbn]
+               delai_reappro=COALESCE($10, delai_reappro),
+               prix_achat=COALESCE($11, prix_achat)
+             WHERE isbn=$12`,
+            [t, a, ed, col, p, s, dp, g, desc, delai, prixAchat, isbn]
           )
           rapport.mis_a_jour++
         } else {
           await pool.query(
-            `INSERT INTO livres (titre, auteur, isbn, prix, stock, editeur, collection, date_publication, genre, description, delai_reappro)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-            [t, a, isbn, p || 0, s, ed, col, dp, g, desc, delai]
+            `INSERT INTO livres (titre, auteur, isbn, prix, stock, editeur, collection, date_publication, genre, description, delai_reappro, prix_achat)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+            [t, a, isbn, p || 0, s, ed, col, dp, g, desc, delai, prixAchat]
           )
           rapport.crees++
         }
@@ -187,7 +189,6 @@ router.post('/catalogue', verifierToken, upload.single('fichier'), async (req, r
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /import/top-ventes
-// Scraping Babelio → croisement ISBN en base → maj selections
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/top-ventes', verifierToken, async (req, res) => {
   try {
@@ -205,18 +206,11 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
       })
 
       const $ = cheerio.load(html)
-
       $('.livre_container, .masgrid_container').each((i, el) => {
-        const lienFiche = $(el).find('a').attr('href') || ''
         const titreBrut = $(el).find('.titre, .book_title, h4, h3').first().text().trim()
         const auteurBrut = $(el).find('.auteurs, .book_author, .auteur').first().text().trim()
         if (titreBrut) {
-          titresScrapés.push({
-            rang: (page - 1) * 20 + i + 1,
-            titre: titreBrut,
-            auteur: auteurBrut,
-            lienFiche: lienFiche.startsWith('/') ? `https://www.babelio.com${lienFiche}` : lienFiche,
-          })
+          titresScrapés.push({ rang: (page - 1) * 20 + i + 1, titre: titreBrut, auteur: auteurBrut })
         }
       })
 
@@ -224,17 +218,12 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
     }
 
     if (titresScrapés.length === 0) {
-      return res.status(502).json({ message: 'Aucun résultat récupéré depuis Babelio. La structure de la page a peut-être changé.' })
+      return res.status(502).json({ message: 'Aucun résultat récupéré depuis Babelio.' })
     }
 
     const normaliser = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]/g, '').trim()
-
     const livresEnBase = await pool.query('SELECT id, titre, auteur FROM livres')
-    const mapBase = livresEnBase.rows.map(l => ({
-      id: l.id,
-      titreN: normaliser(l.titre),
-      auteurN: normaliser(l.auteur || ''),
-    }))
+    const mapBase = livresEnBase.rows.map(l => ({ id: l.id, titreN: normaliser(l.titre), auteurN: normaliser(l.auteur || '') }))
 
     const associations = []
     const nonTrouves = []
@@ -242,53 +231,29 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
     for (const item of titresScrapés) {
       const titreN = normaliser(item.titre)
       const auteurN = normaliser(item.auteur)
-
       let match = mapBase.find(l => l.titreN === titreN)
-
-      if (!match) {
-        match = mapBase.find(l =>
-          l.titreN.includes(titreN) || titreN.includes(l.titreN)
-        )
-      }
-
+      if (!match) match = mapBase.find(l => l.titreN.includes(titreN) || titreN.includes(l.titreN))
       if (match && auteurN) {
-        const avecAuteur = mapBase.find(l =>
-          (l.titreN === titreN || l.titreN.includes(titreN)) &&
-          l.auteurN.includes(auteurN.split(' ')[0])
-        )
+        const avecAuteur = mapBase.find(l => (l.titreN === titreN || l.titreN.includes(titreN)) && l.auteurN.includes(auteurN.split(' ')[0]))
         if (avecAuteur) match = avecAuteur
       }
-
-      if (match) {
-        associations.push({ livre_id: match.id, rang: item.rang, titre: item.titre })
-      } else {
-        nonTrouves.push({ rang: item.rang, titre: item.titre, auteur: item.auteur })
-      }
+      if (match) associations.push({ livre_id: match.id, rang: item.rang })
+      else nonTrouves.push({ rang: item.rang, titre: item.titre, auteur: item.auteur })
     }
 
     await pool.query("DELETE FROM selections WHERE type = 'top_vente' AND genre IS NULL")
-
     for (const a of associations) {
       await pool.query(
-        `INSERT INTO selections (livre_id, type, rang, actif)
-         VALUES ($1, 'top_vente', $2, TRUE)
-         ON CONFLICT DO NOTHING`,
+        `INSERT INTO selections (livre_id, type, rang, actif) VALUES ($1, 'top_vente', $2, TRUE) ON CONFLICT DO NOTHING`,
         [a.livre_id, a.rang]
       )
     }
 
-    res.json({
-      message: 'Scraping Babelio terminé',
-      scrapes: titresScrapés.length,
-      associes: associations.length,
-      non_trouves_en_base: nonTrouves.length,
-      non_trouves: nonTrouves.slice(0, 20),
-    })
-
+    res.json({ message: 'Scraping Babelio terminé', scrapes: titresScrapés.length, associes: associations.length, non_trouves_en_base: nonTrouves.length, non_trouves: nonTrouves.slice(0, 20) })
   } catch (err) {
     console.error('Erreur scraping Babelio:', err.message)
     if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
-      return res.status(502).json({ message: 'Impossible de contacter Babelio. Réessayez dans quelques minutes.' })
+      return res.status(502).json({ message: 'Impossible de contacter Babelio.' })
     }
     res.status(500).json({ message: 'Erreur serveur', detail: err.message })
   }
@@ -296,7 +261,6 @@ router.post('/top-ventes', verifierToken, async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /import/prix
-// Upload CSV (2 colonnes : isbn, label) → selections type 'prix'
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/prix', verifierToken, upload.single('fichier'), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'Aucun fichier reçu' })
@@ -306,9 +270,7 @@ router.post('/prix', verifierToken, upload.single('fichier'), async (req, res) =
   const separateur = premiereLigne.split(';').length > premiereLigne.split(',').length ? ';' : ','
 
   const parsed = Papa.parse(contenu, {
-    header: true,
-    delimiter: separateur,
-    skipEmptyLines: true,
+    header: true, delimiter: separateur, skipEmptyLines: true,
     transformHeader: h => h.toLowerCase().trim(),
   })
 
@@ -316,11 +278,7 @@ router.post('/prix', verifierToken, upload.single('fichier'), async (req, res) =
   const colLabel = parsed.meta.fields?.find(f => ['label', 'prix', 'recompense', 'distinction', 'libelle'].includes(f))
 
   if (!colISBN || !colLabel) {
-    return res.status(400).json({
-      message: 'Le fichier doit contenir les colonnes "isbn" (ou "ean") et "label" (ou "prix").',
-      colonnes_detectees: parsed.meta.fields,
-      exemple: 'isbn;label\n9782070360024;Prix Goncourt 2023'
-    })
+    return res.status(400).json({ message: 'Le fichier doit contenir les colonnes "isbn" et "label".', colonnes_detectees: parsed.meta.fields })
   }
 
   const rapport = { ajoutes: 0, deja_presents: 0, isbn_introuvable: [], ignores: 0 }
@@ -331,39 +289,23 @@ router.post('/prix', verifierToken, upload.single('fichier'), async (req, res) =
     if (!isbn || !label) { rapport.ignores++; continue }
 
     const livre = await pool.query('SELECT id FROM livres WHERE isbn = $1', [isbn])
-    if (livre.rows.length === 0) {
-      rapport.isbn_introuvable.push(isbn)
-      continue
-    }
+    if (livre.rows.length === 0) { rapport.isbn_introuvable.push(isbn); continue }
 
     const livre_id = livre.rows[0].id
+    const exist = await pool.query("SELECT id FROM selections WHERE livre_id=$1 AND type='prix' AND label=$2", [livre_id, label])
 
-    const exist = await pool.query(
-      "SELECT id FROM selections WHERE livre_id=$1 AND type='prix' AND label=$2",
-      [livre_id, label]
-    )
-
-    if (exist.rows.length > 0) {
-      rapport.deja_presents++
-    } else {
-      await pool.query(
-        "INSERT INTO selections (livre_id, type, label, actif) VALUES ($1, 'prix', $2, TRUE)",
-        [livre_id, label]
-      )
+    if (exist.rows.length > 0) rapport.deja_presents++
+    else {
+      await pool.query("INSERT INTO selections (livre_id, type, label, actif) VALUES ($1, 'prix', $2, TRUE)", [livre_id, label])
       rapport.ajoutes++
     }
   }
 
-  res.json({
-    message: 'Import prix littéraires terminé',
-    total: parsed.data.length,
-    ...rapport,
-  })
+  res.json({ message: 'Import prix littéraires terminé', total: parsed.data.length, ...rapport })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /import/apercu-catalogue
-// Retourne les 5 premières lignes parsées pour prévisualisation avant import
+// POST /import/apercu-catalogue
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/apercu-catalogue', verifierToken, upload.single('fichier'), (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'Aucun fichier reçu' })
@@ -373,10 +315,7 @@ router.post('/apercu-catalogue', verifierToken, upload.single('fichier'), (req, 
   const separateur = premiereLigne.split(';').length > premiereLigne.split(',').length ? ';' : ','
 
   const parsed = Papa.parse(contenu, {
-    header: true,
-    delimiter: separateur,
-    skipEmptyLines: true,
-    preview: 5,
+    header: true, delimiter: separateur, skipEmptyLines: true, preview: 5,
     transformHeader: h => h.trim(),
   })
 
@@ -388,6 +327,8 @@ router.post('/apercu-catalogue', verifierToken, upload.single('fichier'), (req, 
     apercu: parsed.data,
     total_estime: contenu.split('\n').length - 1,
     separateur,
+    avec_remise: !!colonnes.remise,
+    avec_prix_achat: !!colonnes.prix_achat,
   })
 })
 

@@ -31,12 +31,8 @@ router.post('/', async function(req, res) {
 router.post('/panier', async function(req, res) {
   const { nom, email, telephone, articles, ce_id, remise, mode_livraison, adresse_livraison } = req.body
 
-  if (!nom || !email) {
-    return res.status(400).json({ message: 'Nom et email obligatoires' })
-  }
-  if (!Array.isArray(articles) || articles.length === 0) {
-    return res.status(400).json({ message: 'Le panier est vide' })
-  }
+  if (!nom || !email) return res.status(400).json({ message: 'Nom et email obligatoires' })
+  if (!Array.isArray(articles) || articles.length === 0) return res.status(400).json({ message: 'Le panier est vide' })
 
   const client = await pool.connect()
   try {
@@ -44,7 +40,7 @@ router.post('/panier', async function(req, res) {
 
     const commandesCreees = []
     const lignesRecap = []
-    const livresCommandesIds = [] // pour la détection saga post-commit
+    const livresCommandesIds = []
 
     for (const article of articles) {
       const { livre_id, quantite = 1 } = article
@@ -55,21 +51,18 @@ router.post('/panier', async function(req, res) {
       const livre = livreResult.rows[0]
 
       const type = livre.stock > 0 ? 'stock' : 'commande'
-
-      // Appliquer la remise CE si présente
       const prixFinal = remise ? parseFloat((livre.prix * (1 - remise / 100)).toFixed(2)) : livre.prix
 
       for (let i = 0; i < quantite; i++) {
         const result = await client.query(
-          `INSERT INTO commandes (livre_id, nom, email, telephone, type, statut)
-           VALUES ($1, $2, $3, $4, $5, 'en attente') RETURNING id`,
-          [livre_id, nom, email, telephone || null, type]
+          `INSERT INTO commandes (livre_id, nom, email, telephone, type, statut, prix_facture, remise_appliquee)
+           VALUES ($1, $2, $3, $4, $5, 'en attente', $6, $7) RETURNING id`,
+          [livre_id, nom, email, telephone || null, type, prixFinal, remise || null]
         )
         commandesCreees.push(result.rows[0].id)
       }
 
       livresCommandesIds.push(livre_id)
-
       lignesRecap.push({
         titre: livre.titre,
         auteur: livre.auteur,
@@ -88,17 +81,13 @@ router.post('/panier', async function(req, res) {
 
     await client.query('COMMIT')
 
-    // ── Détection saga & création tâches CRM (non bloquant) ──────────────────
-    // On récupère l'id du compte client si connecté
+    // ── Détection saga CRM ────────────────────────────────────────────────────
     let clientId = null
     try {
-      const clientResult = await pool.query(
-        'SELECT id FROM comptes_clients WHERE email = $1 LIMIT 1', [email]
-      )
+      const clientResult = await pool.query('SELECT id FROM comptes_clients WHERE email = $1 LIMIT 1', [email])
       if (clientResult.rows.length > 0) clientId = clientResult.rows[0].id
     } catch {}
 
-    // Lancer la détection saga pour chaque livre commandé (async, non bloquant)
     for (const livre_id of livresCommandesIds) {
       creerTacheRelanceSaga(email, clientId, livre_id).catch(err =>
         console.error('[CRM] Erreur détection saga:', err.message)
@@ -144,8 +133,7 @@ router.post('/panier', async function(req, res) {
     const badgeDispo = lignesRecap.some(l => l.type === 'commande')
       ? `<p style="background:#fff8e6;border-radius:8px;padding:12px 16px;color:#B8960C;font-size:13px;margin:20px 0;">
            ⚠️ Certains titres seront commandés auprès de notre distributeur (3 à 5 jours ouvrés).
-         </p>`
-      : ''
+         </p>` : ''
 
     const infoRetrait = mode_livraison === 'entreprise' && adresse_livraison
       ? `<p style="font-weight:700;color:#1A3C2E;margin:0 0 6px;">🏢 Livraison entreprise</p>
@@ -169,11 +157,9 @@ router.post('/panier', async function(req, res) {
             </div>
             <div style="background:white;padding:32px;border:1px solid #eee;border-top:none;border-radius:0 0 12px 12px;">
               <p style="font-size:16px;margin:0 0 8px;">Bonjour <strong>${nom}</strong>,</p>
-              <p style="color:#6B6B5E;margin:0 0 24px;">Votre réservation a bien été enregistrée. Nous vous contacterons dès qu'elle sera prête.</p>
-
+              <p style="color:#6B6B5E;margin:0 0 24px;">Votre réservation a bien été enregistrée.</p>
               ${badgeCE}
               ${badgeLivraison}
-
               <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
                 <thead>
                   <tr style="background:#F9F6F0;">
@@ -191,9 +177,7 @@ router.post('/panier', async function(req, res) {
                   </tr>
                 </tfoot>
               </table>
-
               ${badgeDispo}
-
               <div style="background:#EAF2EC;border-radius:10px;padding:16px 20px;margin-top:24px;">
                 ${infoRetrait}
               </div>
@@ -243,14 +227,51 @@ router.put('/:id/statut', verifierToken, async function(req, res) {
   try {
     const id = parseInt(req.params.id)
     const { statut } = req.body
+
     const result = await pool.query(
       `UPDATE commandes SET statut = $1 WHERE id = $2
-       RETURNING *, (SELECT titre FROM livres WHERE id = commandes.livre_id) as titre`,
+       RETURNING *, (SELECT titre FROM livres WHERE id = commandes.livre_id) AS titre`,
       [statut, id]
     )
     const commande = result.rows[0]
+    if (!commande) return res.status(404).json({ message: 'Commande introuvable' })
 
-    // Mail "prêt à retirer"
+    // ── Quand la commande est récupérée → enregistrer dans ventes ────────────
+    if (statut === 'recupere') {
+      try {
+        // Chercher le client dans la table clients (pour la FK ventes)
+        const clientResult = await pool.query(
+          'SELECT id FROM clients WHERE email = $1 LIMIT 1',
+          [commande.email]
+        )
+
+        if (clientResult.rows.length > 0) {
+          const client_id = clientResult.rows[0].id
+
+          // Prix facturé : utilise prix_facture si dispo (remise CE), sinon prix catalogue
+          const prixVente = commande.prix_facture || commande.prix
+
+          // Éviter les doublons si la commande a déjà été enregistrée
+          const dejaEnregistre = await pool.query(
+            'SELECT id FROM ventes WHERE client_id = $1 AND livre_id = $2 AND date_vente::date = NOW()::date',
+            [client_id, commande.livre_id]
+          )
+
+          if (dejaEnregistre.rows.length === 0) {
+            await pool.query(
+              `INSERT INTO ventes (client_id, livre_id, quantite, prix_unitaire, date_vente)
+               VALUES ($1, $2, 1, $3, NOW())`,
+              [client_id, commande.livre_id, prixVente]
+            )
+          }
+        }
+      } catch (venteErr) {
+        // Non bloquant — la commande est marquée recupere même si l'insertion vente échoue
+        console.error('[Vente] Erreur enregistrement vente:', venteErr.message)
+      }
+    }
+
+    // ── Mail "prêt à retirer" ─────────────────────────────────────────────────
     if (statut === 'pret' && commande) {
       try {
         await resend.emails.send({
