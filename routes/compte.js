@@ -54,7 +54,30 @@ router.post('/inscription', async function(req, res) {
        RETURNING id, nom, prenom, email, date_inscription, ce_id`,
       [nom, prenom, email, hash, ceIdValide]
     )
-    res.status(201).json(result.rows[0])
+    const nouveauCompte = result.rows[0]
+
+    // Recherche client magasin avec même email (LOWER+TRIM)
+    const clientMagasin = await pool.query(
+      `SELECT c.id, COUNT(v.id) AS nb_achats
+       FROM clients c
+       LEFT JOIN ventes v ON v.client_id = c.id
+       WHERE LOWER(TRIM(c.email)) = LOWER(TRIM($1))
+         AND c.compte_client_id IS NULL
+       GROUP BY c.id
+       LIMIT 1`,
+      [email]
+    )
+
+    let rapprochement_propose = null
+    const dejaRefuse = nouveauCompte.rapprochement_refuse === true
+    if (clientMagasin.rows.length > 0 && parseInt(clientMagasin.rows[0].nb_achats) > 0 && !dejaRefuse) {
+      rapprochement_propose = {
+        client_id: clientMagasin.rows[0].id,
+        nb_achats: parseInt(clientMagasin.rows[0].nb_achats),
+      }
+    }
+
+    res.status(201).json({ ...nouveauCompte, rapprochement_propose })
   } catch (err) {
     console.log('erreur inscription:', err.message)
     res.status(500).json({ message: 'Erreur serveur' })
@@ -231,7 +254,8 @@ router.get('/historique', verifierTokenClient, async function(req, res) {
       `SELECT v.id, v.quantite, v.prix_unitaire, v.date_vente, l.titre, l.auteur
        FROM ventes v
        JOIN livres l ON v.livre_id = l.id
-       WHERE v.client_id = (SELECT id FROM clients WHERE email = $1 LIMIT 1)
+       JOIN comptes_clients cc ON cc.client_id = v.client_id
+       WHERE cc.email = $1
        ORDER BY v.date_vente DESC`,
       [email]
     )
@@ -316,6 +340,38 @@ router.put("/preferences", verifierTokenClient, async function(req, res) {
     res.json({ message: "Preferences mises a jour", email_recommandations, email_relance_saga })
   } catch (err) {
     res.status(500).json({ message: "Erreur serveur" })
+  }
+})
+
+// POST /compte/rapprochement/confirmer
+router.post('/rapprochement/confirmer', verifierTokenClient, async function(req, res) {
+  try {
+    const { client_id, accepte } = req.body
+    if (typeof accepte !== 'boolean' || !client_id) {
+      return res.status(400).json({ message: 'Paramètres invalides' })
+    }
+    const compteId = req.client.id
+
+    if (accepte) {
+      await pool.query(
+        'UPDATE clients SET compte_client_id = $1 WHERE id = $2',
+        [compteId, client_id]
+      )
+      await pool.query(
+        'UPDATE comptes_clients SET client_id = $1 WHERE id = $2',
+        [client_id, compteId]
+      )
+    } else {
+      await pool.query(
+        'UPDATE comptes_clients SET rapprochement_refuse = TRUE WHERE id = $1',
+        [compteId]
+      )
+    }
+
+    res.json({ success: true })
+  } catch (err) {
+    console.log('erreur rapprochement/confirmer:', err.message)
+    res.status(500).json({ message: 'Erreur serveur' })
   }
 })
 
